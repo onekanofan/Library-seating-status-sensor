@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include "oled.h"
 #include "nbiot.h"
+#include "irmp.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +65,7 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 int KE1_Parse_NNMI(char *pcNNMI, char *pcOut)
 {
 	char ch = 0, lenFlag = 0, dataFlag = 0;
@@ -104,6 +106,8 @@ void ascii2hex(char *pcAscii, char *pcHex)
 		pos += 2;
 	}
 }
+
+
 extern unsigned char key1, key2;
 char acDevInfo[128] = {0}, acHexBuf[256] = {0}, acAtBuf[512] = {0}, acUserCmd[64] = {0};
 /* USER CODE END 0 */
@@ -115,6 +119,7 @@ char acDevInfo[128] = {0}, acHexBuf[256] = {0}, acAtBuf[512] = {0}, acUserCmd[64
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+	IRMP_DATA irmp_data;
 	const char *pcVersion = "V0.0.7";
 	float fTemp = 34.2, fHumi = 0.0;
 	unsigned short usLight = 0, usSound = 0, usVoltage = 0;
@@ -159,7 +164,7 @@ int main(void)
 	HAL_Delay(500);
 	Beep_Switch(0);
 
-	UART_Enable_Receive_IT();// 使能串口接收中断，开始接收数�??
+	UART_Enable_Receive_IT();// 使能串口接收中断，开始接收数�????
 
 	OLED_Init(); // 初始化OLDE
 
@@ -190,21 +195,23 @@ int main(void)
 
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, 1);
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);	//初始状态为绿灯表示座位可接受预约
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);	//初始状�?�为绿灯表示座位可接受预�??
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	int RayBlock=0;
+
+	HAL_TIM_Base_Start_IT(&htim2);
+	irmp_init();
 	int TempAppr=0;
 	int count=0;
 	int appoint=0;
+	int issit=0;
 
 	while (1)
 	{
     /* USER CODE END WHILE */
 		if(appoint==1) count++;
-
     /* USER CODE BEGIN 3 */
 		if(0 == netFlag){
 			OLED_Show_Note(NULL, 1, tryCnt);
@@ -226,32 +233,69 @@ int main(void)
 			}
 		}
 
-		KE1_I2C_SHT31(&fTemp, &fHumi); // 采集温湿�?
-		KE1_ADC_Senser_Get(&usLight, &usSound, &usVoltage);//采集光强和噪�?
+		KE1_I2C_SHT31(&fTemp, &fHumi); // 采集温湿�???
+		KE1_ADC_Senser_Get(&usLight, &usSound, &usVoltage);//采集光强和噪�???
 		if(0 < fHumi){
 			OLED_ShowT_H(fTemp, fHumi);
 			if(appoint==1){		//有人预约
 				//RayBlock=oled_show_data();
-				if(fTemp>24) TempAppr=1;
+				if(fTemp>23) TempAppr=1;
 				else TempAppr=0;
-				if(TempAppr) {		//有人入座
+
+				//if(irmp_get_data (&irmp_data)==1) ;
+				if(irmp_get_data (&irmp_data)==1) {
+					printf("There is nobody sitting\r\n");
+					issit=0;
+				}
+				else {
+					printf("There is someone sitting\r\n");
+					issit=1;
+				}
+
+				if(TempAppr && issit) {		//有人入座  不发光
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, 1);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
 					count=0;
-				}else if(count<=15){	//离开15分钟以内
+
+
+				}else if(count<=15){	//离开15分钟以内 红灯
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, 0);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
-				}else if(count<=30){	//离开30分钟以内
+
+				}else if(count<=30){	//离开30分钟以内 黄灯
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, 0);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);
-				}else{					//释放座位
+
+				}else{					//释放座位 	    绿灯
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, 1);
 					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);
 					appoint=0;
+				}
+				if(count==1){	//离开座位
+					memset(acDevInfo, 0, sizeof(acDevInfo));
+					memset(acAtBuf, 0, sizeof(acAtBuf));
+					dLen = snprintf(acDevInfo, sizeof(acDevInfo), "{\"T\":\"%0.2f\",\"H\":\"1\",\"L\":\"%d\",\"S\":\"%d\",\"V\":\"%d\",\"NB\":\"%d\"}", fTemp,  usLight,usSound,usVoltage,iSigVal);// 打包设备传感器数�????
+					ascii2hex(acDevInfo, acHexBuf);
+					snprintf(acAtBuf, sizeof(acAtBuf), "AT+NMGS=%d,00%04X%s\r\n", (dLen+3), dLen, acHexBuf);// 打包COAP数据包AT命令
+					KE1_Send_AT(acAtBuf);
+				}else if(count==15){
+					memset(acDevInfo, 0, sizeof(acDevInfo));
+					memset(acAtBuf, 0, sizeof(acAtBuf));
+					dLen = snprintf(acDevInfo, sizeof(acDevInfo), "{\"T\":\"%0.2f\",\"H\":\"0\",\"L\":\"%d\",\"S\":\"%d\",\"V\":\"%d\",\"NB\":\"%d\"}", fTemp,  usLight,usSound,usVoltage,iSigVal);// 打包设备传感器数�????
+					ascii2hex(acDevInfo, acHexBuf);
+					snprintf(acAtBuf, sizeof(acAtBuf), "AT+NMGS=%d,00%04X%s\r\n", (dLen+3), dLen, acHexBuf);// 打包COAP数据包AT命令
+					KE1_Send_AT(acAtBuf);
+				}else if(count==30){
+					memset(acDevInfo, 0, sizeof(acDevInfo));
+					memset(acAtBuf, 0, sizeof(acAtBuf));
+					dLen = snprintf(acDevInfo, sizeof(acDevInfo), "{\"T\":\"%0.2f\",\"H\":\"-1\",\"L\":\"%d\",\"S\":\"%d\",\"V\":\"%d\",\"NB\":\"%d\"}", fTemp,  usLight,usSound,usVoltage,iSigVal);// 打包设备传感器数�????
+					ascii2hex(acDevInfo, acHexBuf);
+					snprintf(acAtBuf, sizeof(acAtBuf), "AT+NMGS=%d,00%04X%s\r\n", (dLen+3), dLen, acHexBuf);// 打包COAP数据包AT命令
+					KE1_Send_AT(acAtBuf);
 				}
 			}
 		}
@@ -271,10 +315,10 @@ int main(void)
 				iUserCase = NB_STEP_CHECK_AT;
 				continue;
 			case NB_STEP_CHECK_AT:
-				KE1_Send_AT("ATE1\r\n");// �?启模块AT命令回显功能
+				KE1_Send_AT("ATE1\r\n");// �???启模块AT命令回显功能
 				break;
 			case NB_STEP_CHECK_REG:
-				if(NB_OK == nbiot_check_reg(3)){// �?查模块网络注册情�?
+				if(NB_OK == nbiot_check_reg(3)){// �???查模块网络注册情�???
 					iUserCase = NB_STEP_UP_REG_INFO;
 					netFlag = 1;
 				}else{
@@ -286,7 +330,7 @@ int main(void)
 				timeout = 10000;
 				break;
 			case NB_STEP_SET_COAP:
-				KE1_Send_AT("AT+NCDP=180.101.147.115,5683\r\n"); // 设置电信物联网南向接口地�?
+				KE1_Send_AT("AT+NCDP=180.101.147.115,5683\r\n"); // 设置电信物联网南向接口地�???
 				break;
 			case NB_STEP_START_MODULE:
 				KE1_Send_AT("AT+CFUN=1\r\n"); // 启动模块
@@ -295,7 +339,7 @@ int main(void)
 			case NB_STEP_SET_PDP:
 				KE1_Send_AT("AT+CGDCONT=1,\"IP\",\"CTNB\"\r\n"); // 设置PDP
 				break;
-			case NB_STEP_SIM_CHECK: //�?查SIM是否存在
+			case NB_STEP_SIM_CHECK: //�???查SIM是否存在
 				KE1_Send_AT("AT+CIMI\r\n");
 				break;
 			case NB_STEP_START_REG:
@@ -306,7 +350,7 @@ int main(void)
 				break;
 			case NB_STEP_WAITING_REG_OK:
 				HAL_Delay(1000);
-				KE1_Send_AT("AT+CGATT?\r\n"); // 检查网络注册状况
+				KE1_Send_AT("AT+CGATT?\r\n"); // �??查网络注册状�??
 				break;
 			case NB_STEP_UP_REG_INFO:
 				if(1 == netFlag && 0 == upNetFreq){
@@ -315,21 +359,20 @@ int main(void)
 					tryCnt = 0;
 					OLED_Show_UP_Flag(1);
 					/*
-					 * 	上报的无线参数�?�必须在数据范围内才算有效数据，数据范围要求�??
-						1. 信号强度，上报范围应�??-140�??-40之间
-						2. 覆盖等级，上报范围应�??0�??2之间
-						3. 信噪比，上报范围应在-20�??30之间
-						4. 小区ID，上报范围应�??0�??2147483647之间
+					 * 	上报的无线参数�?�必须在数据范围内才算有效数据，数据范围要求�????
+						1. 信号强度，上报范围应�????-140�????-40之间
+						2. 覆盖等级，上报范围应�????0�????2之间
+						3. 信噪比，上报范围应在-20�????30之间
+						4. 小区ID，上报范围应�????0�????2147483647之间
 					 * AT样例: AT+NMGS=11,03FFFFFFA608F651550E01
-						平台JSON�??: {"SignalPower":-90,"CellID":150360405,"SNR":14,"ECL":1}
+						平台JSON�????: {"SignalPower":-90,"CellID":150360405,"SNR":14,"ECL":1}
 					 * */
 					memset(acAtBuf, 0, sizeof(acAtBuf));
 					nbiot_get_nuestats(&nbSP, &nbSNR, &nbCCID, &nbECL);
 
 					printf("Signal:%d, %d, %d, %d\r\n", nbSP, nbCCID, nbSNR, nbECL);
-
 					snprintf(acAtBuf, sizeof(acAtBuf), "AT+NMGS=14,03%08X%08X%08X%02X\r\n", nbSP, nbCCID, nbSNR, nbECL);// 打包模组信号强度参数
-					KE1_Send_AT(acAtBuf);// 发�?�信�??
+					KE1_Send_AT(acAtBuf);// 发�?�信�????
 					upNetFreq = (60*60)*2;
 				}
 
@@ -345,7 +388,7 @@ int main(void)
 					memset(acDevInfo, 0, sizeof(acDevInfo));
 					memset(acAtBuf, 0, sizeof(acAtBuf));
 
-					dLen = snprintf(acDevInfo, sizeof(acDevInfo), "{\"T\":\"%0.2f\",\"H\":\"%0.2f\",\"L\":\"%d\",\"S\":\"%d\",\"V\":\"%d\",\"NB\":\"%d\"}", fTemp, fHumi, usLight,usSound,usVoltage,iSigVal);// 打包设备传感器数�??
+					dLen = snprintf(acDevInfo, sizeof(acDevInfo), "{\"T\":\"%0.2f\",\"H\":\"%0.2f\",\"L\":\"%d\",\"S\":\"%d\",\"V\":\"%d\",\"NB\":\"%d\"}", fTemp, fHumi, usLight,usSound,usVoltage,iSigVal);// 打包设备传感器数�????
 					//printf("%s\r\n", acDevInfo);
 
 					if(0 < fHumi){
@@ -414,13 +457,19 @@ int main(void)
 				HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
 				count=0;
 				appoint=1;
+				memset(acDevInfo, 0, sizeof(acDevInfo));
+				memset(acAtBuf, 0, sizeof(acAtBuf));
+				dLen = snprintf(acDevInfo, sizeof(acDevInfo), "{\"T\":\"%0.2f\",\"H\":\"1\",\"L\":\"%d\",\"S\":\"%d\",\"V\":\"%d\",\"NB\":\"%d\"}", fTemp,  usLight,usSound,usVoltage,iSigVal);// 打包设备传感器数�????
+				ascii2hex(acDevInfo, acHexBuf);
+				snprintf(acAtBuf, sizeof(acAtBuf), "AT+NMGS=%d,00%04X%s\r\n", (dLen+3), dLen, acHexBuf);// 打包COAP数据包AT命令
+				KE1_Send_AT(acAtBuf);
 				HAL_Delay(1000);
 				if(0x33 == acUserCmd[7]){
 					HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1);
 				}else if(0x34 == acUserCmd[7]){
 					HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
 				}
-				/* 向平台发送命令响�???
+				/* 向平台发送命令响�?????
 				 * AT+NMGS=5,02000A000A
 				 */
 				acUserCmd[1] = '2';
